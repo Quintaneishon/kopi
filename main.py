@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from uuid import uuid4
 from datetime import datetime, timedelta
+import requests
 
 app = Flask(__name__)
 
@@ -27,7 +28,52 @@ class MockLLM(LLMProvider):
         return ("Reconozco parte de tu punto, pero sostengo mi postura por consistencia en observaciones locales. "
                 "¿Qué experimento aceptarías como decisivo?")
 
-llm: LLMProvider = MockLLM()
+class LocalLLM(LLMProvider):
+    def __init__(self, base="http://127.0.0.1:11434/api/chat", model="llama3.1:latest"):
+        self.base = base
+        self.model = model
+    def generate(self, prompt, max_tokens=512, timeout_s=25):
+        body = {
+            "model": self.model, 
+            "messages":[{"role":"user","content":prompt}], 
+            "options":{"num_predict": max_tokens},
+            "stream": False
+        }
+        try:
+            print(f"Sending request to Ollama: {self.base}")
+            print(f"Model: {self.model}")
+            print(f"Prompt: {prompt[:100]}...")
+            
+            r = requests.post(self.base, json=body, timeout=timeout_s)
+            print(f"Response status: {r.status_code}")
+            print(f"Response text: {r.text[:500]}...")
+            
+            r.raise_for_status()
+            
+            data = r.json()
+            print(f"Parsed JSON: {data}")
+            
+            if "message" in data and "content" in data["message"]:
+                return data["message"]["content"].strip()
+            else:
+                print(f"Unexpected Ollama response format: {data}")
+                return MockLLM().generate(prompt, max_tokens, timeout_s)
+        except requests.exceptions.ConnectionError as e:
+            print(f"Connection error to Ollama: {e}")
+            print("Falling back to MockLLM")
+            return MockLLM().generate(prompt, max_tokens, timeout_s)
+        except requests.exceptions.Timeout as e:
+            print(f"Timeout error: {e}")
+            print("Falling back to MockLLM")
+            return MockLLM().generate(prompt, max_tokens, timeout_s)
+        except (ValueError, KeyError) as e:
+            print(f"Failed to parse Ollama response, falling back to MockLLM: {e}")
+            print(f"Response text: {r.text[:200]}...")
+            return MockLLM().generate(prompt, max_tokens, timeout_s)
+
+
+#llm: LLMProvider = MockLLM()
+llm = LocalLLM()
 
 def next_policy_step(turn: int) -> str:
     if turn == 0: return "OPENING"
@@ -37,14 +83,15 @@ def next_policy_step(turn: int) -> str:
 def build_prompt(state, history_last5):
     policy = next_policy_step(state["turn"])
     guide = {
-      "OPENING": "Declara postura clara, 1 argumento fuerte, tono calmado, termina con 1 pregunta abierta.",
-      "REBUTTAL": "Reconoce parte del punto, refuta con 1–2 razones o analogía, re-encuadra, termina con micro-pregunta.",
-      "CLOSING": "Sintetiza acuerdos, fija criterio de decisión, sugiere prueba mental/falsable; cierra invitando a evaluar ese criterio."
+      "OPENING": "Presenta el tema de manera equilibrada, menciona diferentes perspectivas, tono respetuoso, termina con 1 pregunta abierta.",
+      "REBUTTAL": "Reconoce puntos válidos de ambas partes, presenta evidencia de manera balanceada, termina con micro-pregunta.",
+      "CLOSING": "Sintetiza los puntos principales de ambas perspectivas, sugiere criterios de evaluación, cierra invitando a reflexión."
     }[policy]
 
     system = (
-      f"Rol: persuasivo, sereno, no hostil. Mantén el tema '{state['topic']}' y la postura '{state['stance']}'. "
-      "No cambies de lado. 120–200 palabras. Párrafos cortos. 1 pregunta final. Evita divagar."
+      f"Eres un moderador de debate educado y respetuoso. El tema es '{state['topic']}'. "
+      "Presenta argumentos de manera equilibrada, reconoce diferentes perspectivas, y mantén un tono constructivo. "
+      "120–200 palabras. Párrafos cortos. 1 pregunta final. Evita divagar."
       f" Resumen hasta ahora: {state['summary'][-350:]}"
     )
     conv = "\n".join([f"{r.upper()}: {m}" for r,m in history_last5])
@@ -109,8 +156,8 @@ def chat():
 def extract_topic_stance(first_msg: str):
     msg = first_msg.lower()
     if "tierra" in msg and "plana" in msg:
-        return ("Forma de la Tierra", "La Tierra es plana")
-    return ("Trabajo remoto vs oficina", "Pro trabajo remoto")
+        return ("Forma de la Tierra", "Debate sobre la forma de la Tierra")
+    return ("Trabajo remoto vs oficina", "Debate sobre trabajo remoto vs presencial")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
